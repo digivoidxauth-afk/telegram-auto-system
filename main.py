@@ -1,112 +1,187 @@
+
 import asyncio
 import logging
 import time
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
+
 import config
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
+
 log = logging.getLogger("telegram-auto-system")
 
 SESSION_NAME = "telegram_user_session"
-DM_COOLDOWN_SECONDS = max(0, int(getattr(config, "DM_COOLDOWN_SECONDS", 60)))
-MIN_GROUP_INTERVAL_SECONDS = 3600  # Safety floor: at most one scheduled post per group per hour.
+MIN_GROUP_INTERVAL = 300  # 5 minutes
 
-client = TelegramClient(SESSION_NAME, config.API_ID, config.API_HASH)
+client = TelegramClient(
+    SESSION_NAME,
+    config.API_ID,
+    config.API_HASH
+)
+
 last_dm_reply = {}
 
 
+# ==============================
+# PRIVATE MESSAGE AUTO-REPLY
+# ==============================
+
 @client.on(events.NewMessage(incoming=True))
 async def handle_private_messages(event):
-    if not getattr(config, "DM_AUTO_REPLY", False):
+
+    if not config.DM_AUTO_REPLY:
         return
-    if not event.is_private or event.out or event.sender_id is None:
+
+    if not event.is_private or event.out:
+        return
+
+    if event.sender_id is None:
         return
 
     try:
         sender = await event.get_sender()
+
         if getattr(sender, "bot", False):
             return
 
         now = time.monotonic()
+
+        cooldown = max(
+            0,
+            int(config.DM_COOLDOWN_SECONDS)
+        )
+
         previous = last_dm_reply.get(event.sender_id, 0)
-        if now - previous < DM_COOLDOWN_SECONDS:
+
+        if now - previous < cooldown:
             return
 
-        message = str(getattr(config, "DM_MESSAGE", "")).strip()
+        message = config.DM_MESSAGE.strip()
+
         if not message:
-            log.warning("DM_MESSAGE is empty; skipping reply.")
             return
 
         await event.respond(message)
+
         last_dm_reply[event.sender_id] = now
-        log.info("Sent DM auto-reply to user ID %s", event.sender_id)
+
+        log.info("DM auto-reply sent.")
 
     except FloodWaitError as exc:
-        log.warning("Telegram requested a wait of %s seconds.", exc.seconds)
+        log.warning("Telegram rate limit: waiting %s seconds", exc.seconds)
         await asyncio.sleep(exc.seconds)
-    except Exception:
-        log.exception("Could not process incoming private message.")
 
+    except Exception:
+        log.exception("DM reply error")
+
+
+# ==============================
+# GROUP SCHEDULED MESSAGES
+# ==============================
 
 async def group_scheduler():
-    if not getattr(config, "GROUP_AUTO_MESSAGE", False):
-        log.info("Group auto-messaging is disabled.")
+
+    if not config.GROUP_AUTO_MESSAGE:
+        log.info("Group automation disabled.")
         return
 
-    interval = int(getattr(config, "GROUP_INTERVAL", MIN_GROUP_INTERVAL_SECONDS))
-    if interval < MIN_GROUP_INTERVAL_SECONDS:
+    interval = int(config.GROUP_INTERVAL)
+
+    if interval < MIN_GROUP_INTERVAL:
         log.warning(
-            "GROUP_INTERVAL was below 3600 seconds; using the 1-hour safety minimum."
+            "Minimum group interval is 300 seconds. "
+            "Using 300 seconds."
         )
-        interval = MIN_GROUP_INTERVAL_SECONDS
+        interval = MIN_GROUP_INTERVAL
 
-    group_ids = list(getattr(config, "GROUP_IDS", []))
-    message = str(getattr(config, "GROUP_MESSAGE", "")).strip()
+    groups = list(config.GROUP_IDS)
+    message = config.GROUP_MESSAGE.strip()
 
-    if not group_ids:
-        log.info("No GROUP_IDS configured; group scheduler is idle.")
+    if not groups:
+        log.info("No groups configured.")
         return
+
     if not message:
-        log.warning("GROUP_MESSAGE is empty; group scheduler is idle.")
+        log.warning("Group message is empty.")
         return
+
+    log.info("Group scheduler started.")
+    log.info("Configured interval: %s seconds", interval)
 
     while True:
-        for group_id in group_ids:
+
+        for group_id in groups:
+
             try:
-                await client.send_message(int(group_id), message)
-                log.info("Sent scheduled message to configured group %s", group_id)
-                await asyncio.sleep(2)
+                await client.send_message(
+                    int(group_id),
+                    message
+                )
+
+                log.info(
+                    "Scheduled message sent to group %s",
+                    group_id
+                )
+
+                await asyncio.sleep(3)
+
             except FloodWaitError as exc:
-                log.warning("Telegram requested a wait of %s seconds.", exc.seconds)
+
+                log.warning(
+                    "Telegram requested a wait of %s seconds",
+                    exc.seconds
+                )
+
                 await asyncio.sleep(exc.seconds)
+
             except Exception:
-                log.exception("Could not send to configured group %s", group_id)
+                log.exception(
+                    "Could not send message to group %s",
+                    group_id
+                )
 
         await asyncio.sleep(interval)
 
 
+# ==============================
+# MAIN
+# ==============================
+
 async def main():
+
     if not config.API_ID or not config.API_HASH:
-        raise RuntimeError("Set API_ID and API_HASH in your local config.py first.")
+        raise RuntimeError("Telegram API credentials missing.")
 
     await client.start()
-    me = await client.get_me()
-    log.info("Logged in as %s (ID: %s)", getattr(me, "username", None), me.id)
-    log.info("Session is stored locally in %s.session", SESSION_NAME)
 
-    scheduler_task = asyncio.create_task(group_scheduler())
+    me = await client.get_me()
+
+    log.info(
+        "Logged in successfully: %s",
+        me.id
+    )
+
+    scheduler = asyncio.create_task(group_scheduler())
+
     try:
         await client.run_until_disconnected()
+
     finally:
-        scheduler_task.cancel()
-        await asyncio.gather(scheduler_task, return_exceptions=True)
+        scheduler.cancel()
+
+        await asyncio.gather(
+            scheduler,
+            return_exceptions=True
+        )
+
         await client.disconnect()
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
