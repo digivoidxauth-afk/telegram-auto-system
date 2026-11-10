@@ -16,7 +16,7 @@ logging.basicConfig(
 log = logging.getLogger("telegram-auto-system")
 
 SESSION_NAME = "telegram_user_session"
-MIN_GROUP_INTERVAL = 300  # 5 minutes
+MIN_GROUP_INTERVAL = 3  # 5 minutes
 
 client = TelegramClient(
     SESSION_NAME,
